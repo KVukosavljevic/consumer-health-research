@@ -1249,38 +1249,76 @@ def two_group_test(a: pd.Series, b: pd.Series, label_a: str, label_b: str
               mannwhitney_p=u.pvalue)
 
 
+def overall_test(values: pd.Series, groups: pd.Series, label: str,
+                 order: Optional[Sequence[str]] = None) -> Dict[str, Any]:
+  """Kruskal-Wallis test across all groups, with epsilon-squared effect size
+  (share of rank variance explained by the grouping)."""
+  levels = [g for g in (order or sorted(groups.dropna().unique()))
+            if (groups == g).sum() > 1]
+  samples = [values[groups == g].dropna() for g in levels]
+  h = stats.kruskal(*samples)
+  n, k = sum(len(x) for x in samples), len(samples)
+  return dict(test='Kruskal-Wallis (all groups)', group_a=label,
+              group_b=', '.join(map(str, levels)), n_a=n, n_b=np.nan,
+              kruskal_H=h.statistic, kruskal_p=h.pvalue,
+              epsilon_sq=(h.statistic - k + 1) / (n - k))
+
+
 def group_comparisons(df: pd.DataFrame, metric: str) -> pd.DataFrame:
-  """Tests for the comparisons named by R3-M5.
+  """Tests for the comparisons named by R3-M5 (user-level means).
 
   * sex: Male vs Female;
-  * tropical vs polar: users in the tropics (N./S. Tropics bands) vs the
-    'Far North' band (latitude >= 60 N; the South Polar band is essentially
-    empty);
-  * by age band: each band vs 30-39 (reference);
-  * by hemisphere.
-  REVIEW: which pairs the text actually reports (e.g. HRV 'group
-  comparisons' in Results 2.1) and whether to correct for multiple testing.
-  With N in the millions every p-value will be ~0; the reply should say
-  effect sizes and CIs carry the information.
+  * hemisphere: Northern vs Southern;
+  * age: Kruskal-Wallis across all age bands, then each band vs the next
+    one up (adjacent pairs), matching how the text describes age trends;
+  * latitude: Kruskal-Wallis across all bands; tropics (N. + S. Tropics) vs
+    Far North/South Polar (the reviewer's 'tropical vs polar'); tropics vs
+    each other band (the 'tropical RHR is highest' claim); Mid North vs
+    Far North (the HRV range reported in Results 2.1.2).
+  Pairwise rows give the difference, its 95% CI, Cohen's d, Welch's t-test
+  and Mann-Whitney U. With N in the millions all p-values will be tiny; the
+  reply should point to effect sizes and CIs.
+  REVIEW: the tropics-vs-band and Mid North vs Far North rows are computed for
+  both metrics; keep the ones that match a claim in the text.
   """
   u = user_means(df, metric)
   val = u['value']
-  rows = [two_group_test(val[u['gender'] == 'Male'],
-                         val[u['gender'] == 'Female'], 'Male', 'Female')]
+  rows = []
+
+  def pair(mask_a, mask_b, la, lb, test):
+    r = two_group_test(val[mask_a], val[mask_b], la, lb)
+    r['test'] = test
+    rows.append(r)
+
+  pair(u['gender'] == 'Male', u['gender'] == 'Female', 'Male', 'Female',
+       'sex')
+  pair(u['hemisphere'] == 'Northern', u['hemisphere'] == 'Southern',
+       'Northern', 'Southern', 'hemisphere')
+  # Age: overall + adjacent bands.
+  rows.append(dict(overall_test(val, u['age_band'], 'age bands', AGE_LABELS),
+                   test='age: Kruskal-Wallis'))
+  present = [a for a in AGE_LABELS if (u['age_band'] == a).sum() > 1]
+  for a0, a1 in zip(present[:-1], present[1:]):
+    pair(u['age_band'] == a1, u['age_band'] == a0, a1, a0,
+         'age: adjacent bands')
+  # Latitude: overall + named contrasts.
+  bands = [b for b in LAT_BAND_LABELS if (u['lat_band'] == b).sum() > 1]
+  rows.append(dict(overall_test(val, u['lat_band'], 'latitude bands', bands),
+                   test='latitude: Kruskal-Wallis'))
   trop = u['lat_band'].isin(['N. Tropics', 'S. Tropics'])
   polar = u['lat_band'].isin(['Far North', 'South Polar'])
-  rows.append(two_group_test(val[trop], val[polar], 'Tropics',
-                             'Far North/Polar'))
-  rows.append(two_group_test(val[u['hemisphere'] == 'Northern'],
-                             val[u['hemisphere'] == 'Southern'],
-                             'Northern', 'Southern'))
-  for age in AGE_LABELS:
-    if age != '30-39':
-      rows.append(two_group_test(val[u['age_band'] == age],
-                                 val[u['age_band'] == '30-39'], age, '30-39'))
+  pair(trop, polar, 'Tropics', 'Far North/Polar', 'latitude: tropics vs polar')
+  for b in bands:
+    if b in ('N. Tropics', 'S. Tropics'):
+      continue
+    pair(trop, u['lat_band'] == b, 'Tropics', b,
+         'latitude: tropics vs other band')
+  pair(u['lat_band'] == 'Mid North', u['lat_band'] == 'Far North',
+       'Mid North', 'Far North', 'latitude: Mid North vs Far North')
   out = pd.DataFrame(rows)
   out.insert(0, 'metric', metric)
-  return out
+  first = ['metric', 'test', 'group_a', 'group_b']
+  return out[first + [c for c in out.columns if c not in first]]
 
 
 def rhr_hrv_correlation(df_rhr: pd.DataFrame, df_hrv: pd.DataFrame
