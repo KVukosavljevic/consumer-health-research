@@ -900,7 +900,7 @@ def reduce_overrepresented(df: pd.DataFrame, col: str = 'lat_band',
 
 def run_country_robustness(df: pd.DataFrame, formula: str, metric: str,
                            out_dir: str, reduce_level: str = 'Mid North',
-                           reduce_max_share: float = 0.5,
+                           reduce_max_share: Optional[float] = None,
                            force: bool = False) -> Dict[str, Any]:
   """R1-M3 without assigning users to countries.
 
@@ -911,6 +911,10 @@ def run_country_robustness(df: pd.DataFrame, formula: str, metric: str,
      moves simply gets the country of each month; (c) refitted with the
      over-represented band (Mid North) reduced to ``reduce_max_share`` of
      user-months. Temperature is re-residualised on the reduced sample.
+     Optional and off by default (``reduce_max_share=None``): the reviewer asks
+     for robustness 'across regions *or* when the contribution of highly
+     represented regions is reduced', and the per-region refits
+     (``fit_by_group``) already answer the first.
   REVIEW: country fixed effects also absorb between-country latitude
   differences, so latitude terms are expected to change in (b); the seasonal
   and temperature terms are the ones to compare.
@@ -929,13 +933,14 @@ def run_country_robustness(df: pd.DataFrame, formula: str, metric: str,
   cols, se = {'winner': cb['coef']}, {'winner': cb['std_err']}
   fe = coef_table(fit_lme(formula + ' + C(country_2_alpha_cd)', df))
   cols['country_FE'], se['country_FE'] = fe['coef'], fe['std_err']
-  red, rinfo = reduce_overrepresented(df, 'lat_band', reduce_level,
-                                      reduce_max_share)
-  sl.residualise_temperature(red, 'harmonic')
-  rc = coef_table(fit_lme(formula, red))
-  key = f'{reduce_level.replace(" ", "_")}_reduced'
-  cols[key], se[key] = rc['coef'], rc['std_err']
-  info.update({f'reduced_{k}': v for k, v in rinfo.items()})
+  if reduce_max_share:  # optional; off by default (see docstring)
+    red, rinfo = reduce_overrepresented(df, 'lat_band', reduce_level,
+                                        reduce_max_share)
+    sl.residualise_temperature(red, 'harmonic')
+    rc = coef_table(fit_lme(formula, red))
+    key = f'{reduce_level.replace(" ", "_")}_reduced'
+    cols[key], se[key] = rc['coef'], rc['std_err']
+    info.update({f'reduced_{k}': v for k, v in rinfo.items()})
   _write_json(info, jpath)
   table = pd.DataFrame(cols).join(pd.DataFrame(se), rsuffix='_se')
   table = table[~table.index.str.startswith('C(country')]
