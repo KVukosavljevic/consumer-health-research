@@ -1216,6 +1216,27 @@ def floor_sensitivity_refit(df_base: pd.DataFrame, df_low: pd.DataFrame,
               medians=med.reset_index())
 
 
+def restrict_to_common_users(df_a: pd.DataFrame, df_b: pd.DataFrame
+                             ) -> Tuple[pd.DataFrame, pd.DataFrame,
+                                        Dict[str, int]]:
+  """Keeps only users present in both cohorts [R1-M5].
+
+  A cohort re-extracted later can lose users (e.g. deleted accounts or
+  withdrawn consent), so comparing it with the original cohort would mix the
+  effect of the lower bound with a change of people. Matching on ``user_id``
+  makes the comparison like for like. User-months that only the lower bound
+  keeps are retained (that difference is the effect being measured).
+  """
+  ua = set(df_a['user_id'].astype(str))
+  ub = set(df_b['user_id'].astype(str))
+  both = ua & ub
+  a = df_a[df_a['user_id'].astype(str).isin(both)].copy()
+  b = df_b[df_b['user_id'].astype(str).isin(both)].copy()
+  info = dict(users_a=len(ua), users_b=len(ub), users_common=len(both),
+              users_only_a=len(ua - ub), users_only_b=len(ub - ua))
+  return a, b, info
+
+
 def monthly_means_same_rows(nightly: pd.DataFrame, cohort: pd.DataFrame,
                             lo: float = 10.0, hi: float = 200.0,
                             min_nights: int = 4) -> pd.DataFrame:
