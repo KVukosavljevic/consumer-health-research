@@ -18,6 +18,11 @@ Same functions and output folders as the notebook, so results written here
 are picked up by the notebook (and vice versa). Every section is resumable:
 interrupt and rerun the same command to continue.
 
+B3 (effect sizes, R1-m9) needs no cohort data at all, only two files of the
+notebook-02 run: ``model_<metric>_coefficients_interpreted.csv`` and
+``feature_stats.json``. ``--sections B3`` runs it in seconds without loading
+the cohort; ``--run_dir`` can point at any folder holding those two files.
+
 Example (from the repo folder, in tmux/screen or with nohup):
 
   python src/run_revision.py --metric rhr --sections A1,A2,A3,A6
@@ -42,6 +47,9 @@ def main() -> None:
                  help='comma list among A1 (OOS), A2 (within/between), '
                       'A3 (country), A5 (thresholds), A6 (extra models)')
   p.add_argument('--run_tag', default=None)
+  p.add_argument('--run_dir', default=None,
+                 help='folder with the run\'s coefficients CSV and '
+                      'feature_stats.json (B3 only; default results/<run_tag>)')
   p.add_argument('--formula', default=None, help='override the winner')
   p.add_argument('--subsample_frac', type=float, default=1.0)
   p.add_argument('--random_state', type=int, default=42)
@@ -54,6 +62,12 @@ def main() -> None:
 
   data_dir = fio.get_data_dir()
   t0 = time.time()
+  sections = {s.strip() for s in a.sections.split(',') if s.strip()}
+  if 'B3' in sections:
+    run_effect_sizes(a, data_dir)
+    sections.discard('B3')
+    if not sections:
+      return
   df, _ = rl.load_prepared(a.metric, data_dir, a.subsample_frac,
                            random_state=a.random_state)
   if a.valid_days_csv:
@@ -62,7 +76,6 @@ def main() -> None:
   print(f'{len(df):,} rows / {df["user_id_n"].nunique():,} users '
         f'({time.time() - t0:.0f}s)\nformula: {formula}', flush=True)
   out = lambda *parts: rl.revision_dir(data_dir, a.metric, *parts)
-  sections = {s.strip() for s in a.sections.split(',') if s.strip()}
 
   if 'A1' in sections:
     countries = [c for c in a.holdout_countries.split(',') if c]
@@ -83,6 +96,35 @@ def main() -> None:
     rl.run_extra_models(df, formula, a.metric, out('A6_extra_models'),
                         force=a.force)
   print(f'done in {(time.time() - t0) / 60:.1f} min')
+
+
+def run_effect_sizes(a, data_dir: str) -> None:
+  """B3 from the saved coefficients and feature statistics only."""
+  if a.run_dir:
+    import pandas as pd  # pylint: disable=g-import-not-at-top
+    import seasonality_lib as sl  # pylint: disable=g-import-not-at-top
+    fe = rl.read_csv(sl.coefficients_csv_path(a.run_dir, a.metric),
+                     index_col=0)['coef']
+    fe = fe[~fe.index.astype(str).str.endswith(' Var')]
+    st = sl.read_feature_stats(a.run_dir)
+    if st is not None:
+      st['scaling_factors'] = sl.scaling_factors_from_summary(
+          st['standardisation'])
+  else:
+    fe = rl.winner_coefficients(a.metric, data_dir, a.run_tag)
+    st = rl.run_stats_from_run(a.metric, data_dir, a.run_tag)
+  if fe is None or st is None:
+    raise FileNotFoundError(
+        'B3 needs model_<metric>_coefficients_interpreted.csv and '
+        'feature_stats.json from the notebook-02 run (use --run_dir).')
+  d = rl.revision_dir(data_dir, a.metric, 'B3_effect_sizes')
+  es = rl.effect_sizes(fe, st, a.metric)
+  rl.write_csv(es, os.path.join(d, 'effect_sizes.csv'))
+  grid = rl.effect_size_grid(fe, st, a.metric)
+  rl.write_csv(grid, os.path.join(d, 'effect_size_grid.csv'))
+  print(rl.save_fig(rl.plot_effect_grid(grid, a.metric), d,
+                    'effect_size_grid'))
+  print(es.round(2).to_string())
 
 
 if __name__ == '__main__':
