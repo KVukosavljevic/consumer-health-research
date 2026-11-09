@@ -484,20 +484,42 @@ def evaluate_fold(
   keep = ['user_id_n', 'month', 'activity_period', 'gender', 'age',
           'age_band', 'age_sex', 'lat_band', 'hemisphere', 'un_region',
           'country_2_alpha_cd', 'y', 'pred_marginal', 'pred_conditional']
+  keep += [c for c in ('country_size',) if c in ev]
   keep += [c for c in ('y_ms', 'pred_marginal_ms', 'pred_conditional_ms')
            if c in ev]
   return out, ev[keep], coef_table(res)
 
 
+SPARSE_LEVEL = 'data-sparse countries'
+
+
+def add_sparse_country_group(df: pd.DataFrame, max_users: int) -> List[str]:
+  """Adds ``country_size``: 'data-sparse countries' for users whose modal
+  country has fewer than ``max_users`` users in ``df``, else 'other'.
+  Returns the sparse countries. REVIEW: the threshold."""
+  uc = modal_user_value(df, 'country_2_alpha_cd')
+  n = uc.value_counts()
+  sparse = sorted(n.index[n < max_users].astype(str))
+  df['country_size'] = np.where(
+      df['country_2_alpha_cd'].astype(str).isin(sparse), SPARSE_LEVEL, 'other')
+  return sparse
+
+
 def default_folds(df: pd.DataFrame,
                   countries: Sequence[str] = (),
-                  min_users: int = 200) -> List[Tuple[str, str, Any]]:
+                  min_users: int = 200,
+                  sparse_country_max_users: Optional[int] = None
+                  ) -> List[Tuple[str, str, Any]]:
   """Fold list: (fold_id, kind, level).
 
   * ``user_split``: one participant-level 80/20 split.
   * ``age_sex`` / ``lat_band`` / ``un_region``: leave one level out, for every
     level with at least ``min_users`` users.
   * ``country``: leave out each of ``countries``.
+  * ``country_size``: all users from data-sparse countries (fewer than
+    ``sparse_country_max_users`` users each) held out together, so the model
+    is scored on exactly the countries it has little data for, with enough
+    pooled users for stable metrics.
 
   REVIEW: which countries to hold out (default none; suggest e.g. the
   largest southern-hemisphere country, a tropical one and a far-north one,
@@ -521,6 +543,14 @@ def default_folds(df: pd.DataFrame,
         print(f'[folds]   skipped ({n} < min_users={min_users})')
         continue
       folds.append((f'country={c}', 'country_2_alpha_cd', c))
+  if sparse_country_max_users:
+    sparse = add_sparse_country_group(df, sparse_country_max_users)
+    n_sparse = int(modal_user_value(df, 'country_size').eq(SPARSE_LEVEL).sum())
+    print(f'[folds] data-sparse countries (< {sparse_country_max_users:,} '
+          f'users each): {len(sparse)} countries, {n_sparse:,} users')
+    if n_sparse >= min_users:
+      folds.append((f'country_size={SPARSE_LEVEL}', 'country_size',
+                    SPARSE_LEVEL))
   return folds
 
 

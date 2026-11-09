@@ -22,7 +22,7 @@ Example (from the repo folder, in tmux/screen or with nohup):
 
   python src/run_revision.py --metric rhr --sections A1,A2,A3,A6
   python src/run_revision.py --metric hrv --sections A1 \
-      --holdout_countries AU,BR,NO
+      --holdout_countries GB,IN,CA,BR,ZA,AU
 """
 
 import argparse
@@ -45,8 +45,9 @@ def main() -> None:
   p.add_argument('--formula', default=None, help='override the winner')
   p.add_argument('--subsample_frac', type=float, default=0.10)
   p.add_argument('--random_state', type=int, default=42)
-  p.add_argument('--holdout_countries', default='')
+  p.add_argument('--holdout_countries', default='GB,IN,CA,BR,ZA,AU')
   p.add_argument('--min_users_per_fold', type=int, default=200)
+  p.add_argument('--sparse_country_max_users', type=int, default=1000)
   p.add_argument('--country_cap', type=int, default=300)
   p.add_argument('--valid_days_csv', default=None)
   p.add_argument('--force', action='store_true')
@@ -66,7 +67,8 @@ def main() -> None:
 
   if 'A1' in sections:
     countries = [c for c in a.holdout_countries.split(',') if c]
-    folds = rl.default_folds(df, countries, a.min_users_per_fold)
+    folds = rl.default_folds(df, countries, a.min_users_per_fold,
+                             a.sparse_country_max_users)
     rl.run_oos_validation(df, formula, a.metric, out('A1_oos'), folds,
                           random_state=a.random_state, force=a.force)
   if 'A2' in sections:
