@@ -409,9 +409,10 @@ def generate_figure_1(
       hrv_registry, df_hrv, hrv_col, lat_col, year_cohort
   )
 
-  # Row 1: RHR Age curves
+  # Row 1: RHR Age curves. Women and men share the same y-axis within each
+  # metric (R3-m1): RHR 57-75 bpm, HRV 24-72 ms.
   _plot_age_curves(
-      ax_a, rhr_user, 'Female', 'Resting Heart Rate (bpm)', y_lim=(61, 75)
+      ax_a, rhr_user, 'Female', 'Resting Heart Rate (bpm)', y_lim=(57, 75)
   )
   ax_a.set_title(
       'A. Women: Mean Monthly RHR by Age and Latitude Band',
@@ -427,7 +428,7 @@ def generate_figure_1(
   )
 
   _plot_age_curves(
-      ax_b, rhr_user, 'Male', 'Resting Heart Rate (bpm)', y_lim=(57, 73)
+      ax_b, rhr_user, 'Male', 'Resting Heart Rate (bpm)', y_lim=(57, 75)
   )
   ax_b.set_title(
       'B. Men: Mean Monthly RHR by Age and Latitude Band',
@@ -444,7 +445,7 @@ def generate_figure_1(
 
   # Row 2: HRV Age curves
   _plot_age_curves(
-      ax_c, hrv_user, 'Female', 'Heart Rate Variability (ms)', y_lim=(24, 66)
+      ax_c, hrv_user, 'Female', 'Heart Rate Variability (ms)', y_lim=(24, 72)
   )
   ax_c.set_title(
       'C. Women: Mean Monthly HRV by Age and Latitude Band',
