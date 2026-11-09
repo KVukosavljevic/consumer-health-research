@@ -936,12 +936,13 @@ def run_country_robustness(df: pd.DataFrame, formula: str, metric: str,
 
 
 def fit_by_group(df: pd.DataFrame, formula: str, group_col: str,
-                 min_users: int = 2000) -> pd.DataFrame:
+                 min_users: int = 0) -> pd.DataFrame:
   """Winner refitted separately on the user-months of each group (e.g. UN
   region) [R1-M3]. Rows are selected per month, so a user who moved
   contributes their months to each region. Temperature is re-residualised
-  within each group. Returns long table (group, term, coef, std_err).
-  REVIEW: min_users.
+  within each group. Returns long table (group, term, coef, std_err,
+  n_users). By default every group is fitted, however small; filter on
+  ``n_users`` when choosing what to report.
   """
   out = []
   users = df.groupby(group_col)['user_id_n'].nunique()
