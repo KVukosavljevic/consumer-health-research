@@ -114,6 +114,8 @@ def load_prepared(
     random_state: int = 42,
     extra_cols: Sequence[str] = (),
     residualise: bool = True,
+    path: Optional[str] = None,
+    standardisation: Optional[Mapping[str, float]] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
   """Loads the cohort and builds the predictors exactly like 02_modelling.
 
@@ -133,6 +135,10 @@ def load_prepared(
       count); absent ones are ignored.
     residualise: Residualise temperature on the returned frame. Set False when
       the caller residualises on a training split itself.
+    path: Cohort CSV to read instead of the default one (e.g. an HRV cohort
+      re-extracted with a different lower bound, R1-M5).
+    standardisation: Reuse another run's centring/scaling (e.g. the 20 ms
+      cohort's) so coefficients of two cohorts are on the same scale.
 
   Returns:
     (frame, run_stats) where run_stats holds the standardisation, the
@@ -141,7 +147,7 @@ def load_prepared(
   """
   data_dir = data_dir or fio.get_data_dir()
   target = TARGET_RAW[metric]
-  path = cio.resolve_input_path(data_dir, metric)
+  path = path or cio.resolve_input_path(data_dir, metric)
   df = cio.load_cohort(data_dir, metric, path=path)
   keep = [c for c in NEEDED_COLS + [target] + list(extra_cols) if c in df]
   df = df[keep].copy()
@@ -154,7 +160,8 @@ def load_prepared(
         random_state=random_state, verbose=False)
   add_groups(df)
   male_share = sl.add_sex_and_longitude_features(df)
-  summary = sl.standardise_model_features(df)
+  summary = (sl.standardise_model_features(df, summary=dict(standardisation))
+             if standardisation else sl.standardise_model_features(df))
   sl.add_month_harmonics(df)
   df['target_log'] = (np.log(df[target]) if metric == 'hrv'
                       else df[target].astype(float))
@@ -1103,6 +1110,133 @@ def plot_hrv_distribution_by_age(df: pd.DataFrame, bins=np.arange(10, 151, 2)
   axes[1].legend(title='Age', fontsize=7, frameon=False)
   fig.tight_layout()
   return fig
+
+
+# --- HRV lower-bound sensitivity (R1-M5): 20 ms vs a lower bound -----------
+def nightly_floor_summary(nightly: pd.DataFrame, cohort: pd.DataFrame,
+                          bounds: Sequence[float] = (20.0, 10.0),
+                          hi: float = 200.0, min_nights: int = 4
+                          ) -> pd.DataFrame:
+  """What each lower bound removes, overall and by age band [R1-M5].
+
+  Args:
+    nightly: one row per user-night, columns ``user_id, date, value``
+      (nightly rMSSD in ms, NOT range-filtered).
+    cohort: the HRV cohort (``load_raw('hrv')``), used for each user-month's
+      age and sex.
+    bounds: lower bounds to compare.
+    hi: upper bound (200 ms never binds: the device stops at ~150 ms).
+    min_nights: valid nights needed for a user-month (the paper used 4).
+
+  Returns:
+    Long table (bound, group): share of nights below the bound, share of
+    user-months with >= ``min_nights`` nights that the bound drops entirely,
+    users, and the median / IQR of the monthly means that remain. Groups are
+    'all' and each sex x age band. Same weighting as the paper (one value per
+    user-month).
+  """
+  d = nightly[['user_id', 'date', 'value']].copy()
+  d['date'] = pd.to_datetime(d['date'])
+  d['activity_period'] = d['date'].dt.to_period('M').dt.to_timestamp()
+  info = cohort[['user_id', 'activity_period', 'age', 'gender']].copy()
+  info['activity_period'] = pd.to_datetime(info['activity_period'])
+  info['user_id'] = info['user_id'].astype(str)
+  d['user_id'] = d['user_id'].astype(str)
+  # Age/sex per user: the cohort's value (constant enough within a year).
+  uinfo = info.groupby('user_id')[['age', 'gender']].first()
+  d = d.join(uinfo, on='user_id')
+  d['age_band'] = pd.cut(d['age'], AGE_BINS, labels=AGE_LABELS,
+                         right=False).astype(str)
+  d['group'] = d['gender'].astype(str) + ' ' + d['age_band']
+  rows = []
+  for lo in bounds:
+    ok = (d['value'] >= lo) & (d['value'] <= hi)
+    um = d.assign(ok=ok, v=d['value'].where(ok)).groupby(
+        ['user_id', 'activity_period']).agg(
+            nights=('value', 'size'), valid=('ok', 'sum'), mean=('v', 'mean'),
+            group=('group', 'first'))
+    um['kept'] = um['valid'] >= min_nights
+    um['dropped_by_bound'] = (um['nights'] >= min_nights) & ~um['kept']
+    for gname, g_n, g_um in [('all', d, um)] + [
+        (k, d[d['group'] == k], um[um['group'] == k])
+        for k in sorted(d['group'].dropna().unique())]:
+      kept = g_um.loc[g_um['kept'], 'mean']
+      rows.append(dict(
+          lower_bound_ms=lo, group=gname,
+          users=int(g_n['user_id'].nunique()), nights=int(len(g_n)),
+          nights_below_bound_pct=100 * float((g_n['value'] < lo).mean()),
+          user_months_dropped_by_bound_pct=100 * float(
+              g_um['dropped_by_bound'].mean()),
+          user_months_kept=int(g_um['kept'].sum()),
+          median_monthly_ms=float(kept.median()),
+          q1_monthly_ms=float(kept.quantile(.25)),
+          q3_monthly_ms=float(kept.quantile(.75))))
+  return pd.DataFrame(rows)
+
+
+def floor_sensitivity_refit(df_base: pd.DataFrame, df_low: pd.DataFrame,
+                            formula: str, out_dir: str,
+                            labels: Tuple[str, str] = ('20 ms', '10 ms'),
+                            force: bool = False) -> Dict[str, Any]:
+  """Final HRV model refitted on two cohorts that differ only in the lower
+  bound used to build the monthly means [R1-M5].
+
+  Both are fitted by REML (as the paper's coefficient tables). Returns the
+  coefficients side by side with the difference and the ratio, plus fit
+  statistics and the median HRV by age band in each cohort.
+  """
+  cpath = os.path.join(out_dir, 'floor_coefficients_compare.csv')
+  jpath = os.path.join(out_dir, 'floor_fit_compare.json')
+  mpath = os.path.join(out_dir, 'floor_median_by_age.csv')
+  if all(fio.file_exists(x) for x in (cpath, jpath, mpath)) and not force:
+    return dict(coefficients=read_csv(cpath), fit=_read_json(jpath),
+                medians=read_csv(mpath))
+  target = TARGET_FIT['hrv']
+  fits, tabs = {}, {}
+  for lab, d in zip(labels, (df_base, df_low)):
+    res = fit_lme(formula, d, reml=True)
+    tabs[lab] = coef_table(res)
+    var_u, var_e = variance_components(res)
+    fits[lab] = dict(n_rows=len(d), n_users=int(d['user_id_n'].nunique()),
+                     var_u=var_u, var_e=var_e)
+  a, b = labels
+  t = tabs[a][['coef', 'std_err']].join(tabs[b][['coef', 'std_err']],
+                                         lsuffix=f' ({a})', rsuffix=f' ({b})')
+  t['difference'] = t[f'coef ({b})'] - t[f'coef ({a})']
+  t['ratio'] = t[f'coef ({b})'] / t[f'coef ({a})']
+  col = TARGET_RAW['hrv']
+  med = pd.DataFrame({
+      lab: d.groupby('age_band')[col].median() for lab, d in
+      zip(labels, (df_base, df_low))})
+  med.index.name = 'age_band'
+  write_csv(t, cpath, index=True)
+  _write_json(fits, jpath)
+  write_csv(med, mpath, index=True)
+  return dict(coefficients=t.reset_index(), fit=fits,
+              medians=med.reset_index())
+
+
+def monthly_means_same_rows(nightly: pd.DataFrame, cohort: pd.DataFrame,
+                            lo: float = 10.0, hi: float = 200.0,
+                            min_nights: int = 4) -> pd.DataFrame:
+  """Fallback when no re-extracted cohort exists: recompute the monthly HRV
+  of the EXISTING user-months from nightly values with bound ``lo``.
+
+  Only the target changes; user-months that the 20 ms bound dropped cannot be
+  added back (their location / temperature rows are not in the cohort), so
+  this understates the effect of the bound. REVIEW: prefer re-extracting the
+  cohort with the lower bound in the upstream pipeline.
+  """
+  m = monthly_from_daily(nightly, lo=lo, hi=hi, min_days=min_nights)
+  m['user_id'] = m['user_id'].astype(str)
+  out = cohort.copy()
+  out['user_id'] = out['user_id'].astype(str)
+  out['activity_period'] = pd.to_datetime(out['activity_period'])
+  out = out.merge(m[['user_id', 'activity_period', 'value']],
+                  on=['user_id', 'activity_period'], how='left')
+  col = TARGET_RAW['hrv']
+  out[col] = out['value'].fillna(out[col])
+  return out.drop(columns='value')
 
 
 # --- Daily data (NOT in the public schema) ---------------------------------
