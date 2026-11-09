@@ -1443,6 +1443,127 @@ def effect_sizes(fe: pd.Series, run_stats: Mapping[str, Any], metric: str,
   return pd.DataFrame(rows, columns=['contrast', f'effect ({unit})'])
 
 
+def effect_size_grid(fe: pd.Series, run_stats: Mapping[str, Any], metric: str,
+                     lats=(-45, -35, -25, -10, 0, 10, 25, 35, 45, 55, 65),
+                     ages=(20, 30, 40, 50, 60, 70, 80),
+                     dtemps=(-5, 1, 5, 10)) -> pd.DataFrame:
+  """Many scenarios at once [R1-m9]; no refitting, so it is instant.
+
+  Long table with columns ``kind, latitude, sex, age, month, from, to,
+  effect`` (RHR in bpm, HRV in %). Kinds:
+  * ``age``: each step between consecutive ``ages``, by sex and latitude;
+  * ``sex``: male minus female at each age and latitude;
+  * ``temperature``: +dT degC above the usual temperature for that place
+    and month, per month and averaged over the year (``month`` = 0), at each
+    latitude (season interactions make it differ by month);
+  * ``latitude``: 10 deg further from the equator (from each latitude in
+    ``lats`` with |lat| <= 55), at the usual temperature for the new place,
+    averaged over the year;
+  * ``season``: peak-to-trough over the year at each latitude, with the peak
+    and trough months.
+  Temperature residuals are 0 (usual temperature) except in the temperature
+  rows; reference age 40 and sex-balanced unless stated.
+  REVIEW: the grid; quote whichever rows match the text.
+  """
+  summ = run_stats['standardisation']
+  male_share = run_stats['male_share']
+  factors = run_stats['scaling_factors']
+  months = np.arange(1, 13)
+
+  def profile(age=40.0, male=None, lat=45.0, dtemp=0.0):
+    p = pd.DataFrame({
+        'activity_period': pd.to_datetime([f'2022-{m:02d}-01' for m in months]),
+        'age': float(age), 'lat_e7': lat * 1e7, 'lng_e7': 0.0})
+    p['dl_monthly'] = sl.mid_month_day_length_hours(lat, months)
+    for c in ('avg_temp_mean', 'avg_temp_max', 'avg_temp_min'):
+      p[c] = summ.get(f'{c}_mean', 0.0)
+    sl.add_month_harmonics(p)
+    p['gender_n'] = 0.0 if male is None else float(male) - male_share
+    p['abs_lat_e7'] = p['lat_e7'].abs()
+    p['sin_lng'], p['cos_lng'] = 0.0, 1.0
+    sl.standardise_model_features(p, summary=summ)
+    for c in ('avg_temp_mean', 'avg_temp_max', 'avg_temp_min'):
+      key = f'{c}_c'
+      shift = dtemp / factors[key] if key in factors else 0.0
+      p[f'{c}_c_res'] = shift
+      p[f'{c}_sq_c_res'] = shift ** 2
+    return p
+
+  def pred(p):
+    return sl.predict_from_coefficients(p, fe).to_numpy()
+
+  def fmt(d):
+    d = np.asarray(d, float)
+    return (np.exp(d) - 1) * 100 if metric == 'hrv' else d
+
+  rows = []
+  sexes = [('Female', 0), ('Male', 1)]
+  for lat in lats:
+    for sex, male in sexes:
+      for a0, a1 in zip(ages[:-1], ages[1:]):
+        d = pred(profile(a1, male, lat)) - pred(profile(a0, male, lat))
+        rows.append(dict(kind='age', latitude=lat, sex=sex, age=a0, month=0,
+                         **{'from': a0, 'to': a1}, effect=float(fmt(d.mean()))))
+    for age in ages:
+      d = pred(profile(age, 1, lat)) - pred(profile(age, 0, lat))
+      rows.append(dict(kind='sex', latitude=lat, sex='Male - Female', age=age,
+                       month=0, **{'from': 'Female', 'to': 'Male'},
+                       effect=float(fmt(d.mean()))))
+    base = pred(profile(lat=lat))
+    for dt in dtemps:
+      d = pred(profile(lat=lat, dtemp=dt)) - base
+      rows.append(dict(kind='temperature', latitude=lat, sex='both', age=40,
+                       month=0, **{'from': 0, 'to': dt},
+                       effect=float(fmt(d.mean()))))
+      for m, dm in zip(months, d):
+        rows.append(dict(kind='temperature', latitude=lat, sex='both', age=40,
+                         month=int(m), **{'from': 0, 'to': dt},
+                         effect=float(fmt(dm))))
+    if abs(lat) <= 55:
+      lat1 = lat + 10 if lat >= 0 else lat - 10
+      d = pred(profile(lat=lat1)) - base
+      rows.append(dict(kind='latitude', latitude=lat, sex='both', age=40,
+                       month=0, **{'from': lat, 'to': lat1},
+                       effect=float(fmt(d.mean()))))
+    s = pd.Series(base, index=months)
+    rows.append(dict(kind='season', latitude=lat, sex='both', age=40, month=0,
+                     **{'from': int(s.idxmin()), 'to': int(s.idxmax())},
+                     effect=float(fmt(s.max() - s.min()))))
+  out = pd.DataFrame(rows)
+  out['unit'] = '%' if metric == 'hrv' else 'bpm'
+  return out
+
+
+def plot_effect_grid(grid: pd.DataFrame, metric: str) -> plt.Figure:
+  """Seasonal swing by latitude, +5 degC effect by month and latitude, and the
+  age curve by sex (from the effect grid)."""
+  unit = '%' if metric == 'hrv' else 'bpm'
+  fig, axes = plt.subplots(1, 3, figsize=(10.5, 3.0))
+  se = grid[grid['kind'] == 'season']
+  axes[0].plot(se['latitude'], se['effect'], 'o-')
+  axes[0].set_xlabel('Latitude (deg)')
+  axes[0].set_ylabel(f'Seasonal peak-to-trough ({unit})')
+  t = grid[(grid['kind'] == 'temperature') & (grid['to'] == 5)
+           & (grid['month'] > 0)]
+  for lat, g in t.groupby('latitude'):
+    if lat in (-35, 0, 45, 65):
+      axes[1].plot(g['month'], g['effect'], label=f'{lat:+d} deg')
+  axes[1].axhline(0, color='k', lw=0.5)
+  axes[1].set_xticks(range(1, 13))
+  axes[1].set_xticklabels(MONTH_TICKS)
+  axes[1].set_ylabel(f'+5 degC effect ({unit})')
+  axes[1].legend(fontsize=7, frameon=False)
+  a = grid[(grid['kind'] == 'age') & (grid['latitude'] == 45)]
+  for sex, g in a.groupby('sex'):
+    axes[2].plot(g['to'], g['effect'].cumsum(), 'o-', label=sex)
+  axes[2].set_xlabel('Age (years)')
+  axes[2].set_ylabel(f'Change since age {int(a["from"].min())} ({unit})')
+  axes[2].legend(fontsize=7, frameon=False)
+  fig.suptitle(metric.upper(), fontsize=9)
+  fig.tight_layout()
+  return fig
+
+
 def country_residual_correlation(df: pd.DataFrame, result, metric: str,
                                  external_csv: str,
                                  min_users: int = 200) -> pd.DataFrame:
