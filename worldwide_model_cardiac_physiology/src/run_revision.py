@@ -43,7 +43,7 @@ def main() -> None:
                       'A3 (country), A5 (thresholds), A6 (extra models)')
   p.add_argument('--run_tag', default=None)
   p.add_argument('--formula', default=None, help='override the winner')
-  p.add_argument('--subsample_frac', type=float, default=0.10)
+  p.add_argument('--subsample_frac', type=float, default=1.0)
   p.add_argument('--random_state', type=int, default=42)
   p.add_argument('--holdout_countries', default='GB,IN,CA,BR,ZA,AU')
   p.add_argument('--min_users_per_fold', type=int, default=200)
