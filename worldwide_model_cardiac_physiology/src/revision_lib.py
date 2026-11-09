@@ -495,6 +495,12 @@ def evaluate_fold(
         out[f'{name}_{k}'] = v
   for k, v in aggregate_metrics(ev, None).items():
     out[f'test_global_{k}'] = v
+  # Held-out sets that span both hemispheres or several climates (e.g. the
+  # pooled data-sparse countries) have opposite seasonal curves that cancel
+  # in a single pooled monthly mean, so also score the monthly means within
+  # each latitude band (cells = band x month; offsets removed per band).
+  for k, v in aggregate_metrics(ev, 'lat_band').items():
+    out[f'test_bylat_{k}'] = v
   keep = ['user_id_n', 'month', 'activity_period', 'gender', 'age',
           'age_band', 'age_sex', 'lat_band', 'hemisphere', 'un_region',
           'country_2_alpha_cd', 'y', 'pred_marginal', 'pred_conditional']
@@ -646,6 +652,9 @@ def oos_summary_table(table: pd.DataFrame, metric: str) -> pd.DataFrame:
       'test_global_agg_level_bias': 'Monthly-mean level offset',
       'test_global_agg_shape_rmse': 'Monthly-mean RMSE after offset',
       'test_global_amplitude_ratio': 'Amplitude ratio (pred/obs)',
+      'test_bylat_agg_r': 'Monthly-mean r (within latitude bands)',
+      'test_bylat_agg_shape_rmse': 'RMSE after offset (within bands)',
+      'test_bylat_amplitude_ratio': 'Amplitude ratio (within bands)',
   }
   cols = {k: v for k, v in cols.items() if k in table}
   return table[list(cols)].rename(columns=cols)
