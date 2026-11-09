@@ -348,8 +348,21 @@ def aggregate_metrics(pred: pd.DataFrame, group_col: Optional[str],
   cell = cell[cell['n'] >= min_rows]
   if len(cell) < 3:
     return dict(agg_r=np.nan, agg_rmse=np.nan, agg_nrmse=np.nan,
+                agg_level_bias=np.nan, agg_shape_rmse=np.nan,
                 amplitude_ratio=np.nan, n_cells=len(cell))
   rmse = float(np.sqrt(np.mean((cell['o'] - cell['p']) ** 2)))
+  # Level vs shape: a held-out country/region can have a non-zero mean random
+  # intercept (a constant offset), which the fixed effects cannot know. Split
+  # the error into that offset and the error left after removing it.
+  if group_col is None:
+    d = cell['o'] - cell['p']
+    bias = float(d.mean())
+    shape_rmse = float(np.sqrt(np.mean((d - bias) ** 2)))
+  else:
+    d = cell['o'] - cell['p']
+    off = d.groupby(cell[group_col]).transform('mean')
+    bias = float(d.mean())
+    shape_rmse = float(np.sqrt(np.mean((d - off) ** 2)))
   if group_col is None:
     amp = (cell['p'].max() - cell['p'].min()) / (cell['o'].max() -
                                                  cell['o'].min())
@@ -360,6 +373,7 @@ def aggregate_metrics(pred: pd.DataFrame, group_col: Optional[str],
     amp = float((rng['po'] / rng['oo'].replace(0, np.nan)).mean())
   return dict(agg_r=float(np.corrcoef(cell['o'], cell['p'])[0, 1]),
               agg_rmse=rmse, agg_nrmse=rmse / float(cell['o'].std()),
+              agg_level_bias=bias, agg_shape_rmse=shape_rmse,
               amplitude_ratio=float(amp), n_cells=len(cell))
 
 
@@ -629,6 +643,9 @@ def oos_summary_table(table: pd.DataFrame, metric: str) -> pd.DataFrame:
       'test_conditional_r2': 'Test R² (conditional)',
       'test_global_agg_r': 'Monthly-mean r',
       'test_global_agg_nrmse': 'Monthly-mean NRMSE',
+      'test_global_agg_level_bias': 'Monthly-mean level offset',
+      'test_global_agg_shape_rmse': 'Monthly-mean RMSE after offset',
+      'test_global_amplitude_ratio': 'Amplitude ratio (pred/obs)',
   }
   cols = {k: v for k, v in cols.items() if k in table}
   return table[list(cols)].rename(columns=cols)
