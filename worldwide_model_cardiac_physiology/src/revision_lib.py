@@ -512,8 +512,15 @@ def default_folds(df: pd.DataFrame,
       if kind == 'un_region' and str(level) in ('unknown', 'nan'):
         continue
       folds.append((f'{kind}={level}', kind, level))
-  for c in countries:
-    folds.append((f'country={c}', 'country_2_alpha_cd', c))
+  if countries:
+    cn = modal_user_value(df, 'country_2_alpha_cd').value_counts()
+    for c in countries:
+      n = int(cn.get(c, 0))
+      print(f'[folds] hold-out country {c}: {n:,} users in the fitting sample')
+      if n < min_users:
+        print(f'[folds]   skipped ({n} < min_users={min_users})')
+        continue
+      folds.append((f'country={c}', 'country_2_alpha_cd', c))
   return folds
 
 
