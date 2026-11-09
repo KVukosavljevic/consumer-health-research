@@ -797,95 +797,114 @@ def within_temperature_curve(coefs: pd.DataFrame, run_stats: Mapping[str, Any],
 # 5. Country clustering and regional robustness [R1-M3]
 # ===========================================================================
 def country_counts(df: pd.DataFrame) -> pd.DataFrame:
-  """Users / user-months per country (supplementary table)."""
-  user_country = modal_user_value(df, 'country_2_alpha_cd')
-  region = df.groupby('country_2_alpha_cd')['un_region'].agg(
-      lambda s: s.value_counts().index[0])
+  """Users / user-months per country (supplementary table).
+
+  Countries are taken per user-month, so a user who spent months in two
+  countries is counted in both (users are not assigned to a single country).
+  """
+  c = df['country_2_alpha_cd'].astype(str)
   t = pd.DataFrame({
-      'users': user_country.value_counts(),
-      'user_months': df['country_2_alpha_cd'].value_counts(),
+      'users': df.groupby(c)['user_id_n'].nunique(),
+      'user_months': c.value_counts(),
   }).fillna(0).astype(int)
-  t['un_region'] = region.reindex(t.index)
-  t['share_users_%'] = 100 * t['users'] / t['users'].sum()
+  t['un_region'] = df.groupby(c)['un_region'].agg(
+      lambda s: s.value_counts().index[0]).reindex(t.index)
+  t['share_user_months_%'] = 100 * t['user_months'] / t['user_months'].sum()
   t.index.name = 'country'
   return t.sort_values('users', ascending=False)
 
 
+def country_crossing_summary(df: pd.DataFrame) -> Dict[str, float]:
+  """How many users appear in more than one country / latitude band in the
+  year (for the reply: the model does not tie users to one country)."""
+  n_c = df.groupby('user_id_n')['country_2_alpha_cd'].nunique()
+  n_b = df.groupby('user_id_n')['lat_band'].nunique()
+  modal = df['user_id_n'].map(modal_user_value(df, 'country_2_alpha_cd'))
+  return dict(
+      users=int(len(n_c)),
+      users_multi_country=int((n_c > 1).sum()),
+      users_multi_country_pct=100 * float((n_c > 1).mean()),
+      user_months_outside_main_country_pct=100 * float(
+          (df['country_2_alpha_cd'] != modal).mean()),
+      users_multi_lat_band=int((n_b > 1).sum()),
+      users_multi_lat_band_pct=100 * float((n_b > 1).mean()))
+
+
 def country_variance_share(df: pd.DataFrame, result, metric: str
                            ) -> Dict[str, float]:
-  """Country share of the variance left after the fixed effects.
+  """Share of the variance left after the fixed effects that lies between
+  countries.
 
-  Two estimates on users' mean marginal residuals (one row per user, modal
-  country):
-  * a random-intercept model ``mean_resid ~ 1 | country`` (binned fitter),
-    giving the between-country variance;
-  * the same expressed as a share of the total marginal residual variance
-    (country + person + month-to-month).
-  REVIEW: user means carry sampling noise var_e / n_i, which ends up in the
-  within-country part, not in the country part, so the country variance is
-  not inflated by it.
+  Uses the country of each user-month (no assignment of users to countries):
+  a random-intercept model ``marginal residual ~ 1 | country`` on the
+  user-month rows. The between-country variance is compared with the total
+  marginal residual variance (country + person + month-to-month).
+  REVIEW: user-months of the same person are treated as independent here,
+  which is fine for a variance share but not for inference.
   """
   target = TARGET_FIT[metric]
   r = df[target].to_numpy() - fixed_prediction(df, result.fe_params)
-  u = pd.DataFrame({'user_id_n': df['user_id_n'], 'r': r}).groupby(
-      'user_id_n')['r'].mean().rename('mean_resid').to_frame()
-  u['country'] = modal_user_value(df, 'country_2_alpha_cd')
-  u['country_n'] = u['country'].astype('category').cat.codes
+  d = pd.DataFrame({'r': r, 'country_n': df['country_2_alpha_cd']
+                    .astype('category').cat.codes.to_numpy()})
   res_c = lme_binned.BinnedMixedLM.from_formula(
-      'mean_resid ~ 1', data=u, groups='country_n').fit(reml=True,
-                                                         method='lbfgs')
-  var_c, var_within_c = variance_components(res_c)
+      'r ~ 1', data=d, groups='country_n').fit(reml=True, method='lbfgs')
+  var_c, _ = variance_components(res_c)
   var_u, var_e = variance_components(result)
   total = float(np.var(r))
-  return dict(var_country=var_c, var_user_means_within_country=var_within_c,
-              var_user_model=var_u, var_month_model=var_e,
+  return dict(var_country=var_c, var_user_model=var_u, var_month_model=var_e,
               total_marginal_resid_var=total,
               country_share_of_marginal_resid=var_c / total,
-              country_share_of_between_person=var_c / (var_c + var_within_c),
-              n_countries=int(u['country'].nunique()), n_users=len(u))
+              country_share_of_person_level=var_c / (var_c + var_u),
+              n_countries=int(df['country_2_alpha_cd'].nunique()))
 
 
-def capped_subsample(df: pd.DataFrame, cap: int = 300, random_state: int = 0
-                     ) -> pd.DataFrame:
-  """At most ``cap`` users per (modal) country. REVIEW: cap."""
-  uc = modal_user_value(df, 'country_2_alpha_cd').rename('country_modal')
-  keep = (uc.reset_index().groupby('country_modal', group_keys=False)
-          .apply(lambda g: g.sample(min(cap, len(g)),
-                                    random_state=random_state))['user_id_n'])
-  out = df[df['user_id_n'].isin(keep)].copy()
-  out['country_modal'] = out['user_id_n'].map(uc)
-  return out
-
-
-def fit_country_nested(df: pd.DataFrame, formula: str):
-  """Users nested in countries: country random intercept + user variance
-  component (statsmodels MixedLM; slow, so use on a capped subsample).
-
-  Users are assigned to their modal country, so the user and country
-  intercepts are nested; for users who never move country this is the same
-  as crossed random effects. REVIEW: the earlier plan said 'crossed'; with
-  modal-country assignment the two coincide, and nested is what statsmodels
-  can fit.
+def reduce_overrepresented(df: pd.DataFrame, col: str = 'lat_band',
+                           level: str = 'Mid North', max_share: float = 0.5,
+                           random_state: int = 0) -> Tuple[pd.DataFrame,
+                                                           Dict[str, float]]:
+  """Randomly drops users with any month in ``level`` until that level makes
+  up at most ``max_share`` of user-months [R1-M3: 'when the contribution of
+  highly represented regions is reduced']. Whole users are kept or dropped;
+  no user is assigned to a region. REVIEW: level and max_share.
   """
-  import statsmodels.formula.api as smf  # pylint: disable=g-import-not-at-top
-  model = smf.mixedlm(formula, data=df, groups='country_modal',
-                      re_formula='1',
-                      vc_formula={'user': '0 + C(user_id_n)'})
-  return model.fit(reml=True, method=['bfgs', 'lbfgs', 'cg'])
+  in_lvl = df.groupby('user_id_n')[col].agg(lambda s: (s == level).any())
+  lvl_users = in_lvl.index[in_lvl]
+  share0 = float((df[col] == level).mean())
+  rows_lvl = (df[col] == level).sum()
+  rows_other = len(df) - rows_lvl
+  # Keep a fraction f of level users so that f*rows_lvl/(f*rows_lvl+other)
+  # ~= max_share (ignores the few non-level months of level users).
+  f = 1.0 if share0 <= max_share else (
+      max_share * rows_other / ((1 - max_share) * rows_lvl))
+  rng = np.random.default_rng(random_state)
+  keep_lvl = rng.choice(lvl_users, size=int(round(f * len(lvl_users))),
+                        replace=False)
+  keep = df['user_id_n'].isin(set(keep_lvl)) | ~df['user_id_n'].isin(
+      set(lvl_users))
+  out = df[keep].copy()
+  info = dict(level=level, share_before=share0,
+              share_after=float((out[col] == level).mean()),
+              users_before=int(df['user_id_n'].nunique()),
+              users_after=int(out['user_id_n'].nunique()))
+  return out, info
 
 
 def run_country_robustness(df: pd.DataFrame, formula: str, metric: str,
-                           out_dir: str, cap: int = 300,
-                           fit_nested: bool = True, force: bool = False
-                           ) -> Dict[str, Any]:
-  """R1-M3: country table, variance share, capped refits, country FE check.
+                           out_dir: str, reduce_level: str = 'Mid North',
+                           reduce_max_share: float = 0.5,
+                           force: bool = False) -> Dict[str, Any]:
+  """R1-M3 without assigning users to countries.
 
-  Fits on the capped subsample:
-  (a) the winner with user intercepts only (baseline on the same rows);
-  (b) users nested in countries (country random intercept), if fit_nested;
-  and on the full fitting sample:
-  (c) the winner plus country fixed effects ``C(country_2_alpha_cd)``.
-  Writes ``country_*.csv/json`` and returns the pieces.
+  1. Users / user-months per country and how many users cross countries.
+  2. Share of residual variance between countries (country of each month).
+  3. Coefficients of the winner: (a) as fitted; (b) with country fixed
+     effects ``C(country_2_alpha_cd)`` taken per user-month, so a user who
+     moves simply gets the country of each month; (c) refitted with the
+     over-represented band (Mid North) reduced to ``reduce_max_share`` of
+     user-months. Temperature is re-residualised on the reduced sample.
+  REVIEW: country fixed effects also absorb between-country latitude
+  differences, so latitude terms are expected to change in (b); the seasonal
+  and temperature terms are the ones to compare.
   """
   jpath = os.path.join(out_dir, 'country_variance_share.json')
   cpath = os.path.join(out_dir, 'country_coefficients_compare.csv')
@@ -894,50 +913,44 @@ def run_country_robustness(df: pd.DataFrame, formula: str, metric: str,
                 counts=read_csv(os.path.join(out_dir, 'country_counts.csv')))
   counts = country_counts(df)
   write_csv(counts, os.path.join(out_dir, 'country_counts.csv'), index=True)
-  base_full = fit_lme(formula, df)
-  var = country_variance_share(df, base_full, metric)
-  _write_json(var, jpath)
-  cols = {'full_user_RI': coef_table(base_full)['coef']}
-  se = {'full_user_RI': coef_table(base_full)['std_err']}
-  fe_formula = formula + ' + C(country_2_alpha_cd)'
-  fe = coef_table(fit_lme(fe_formula, df))
-  cols['full_country_FE'], se['full_country_FE'] = fe['coef'], fe['std_err']
-  capped = capped_subsample(df, cap)
-  b = coef_table(fit_lme(formula, capped))
-  cols['capped_user_RI'], se['capped_user_RI'] = b['coef'], b['std_err']
-  if fit_nested:
-    try:
-      nres = fit_country_nested(capped, formula)
-      cols['capped_nested_country'] = nres.fe_params
-      se['capped_nested_country'] = nres.bse_fe
-      var['nested_country_var'] = float(nres.cov_re.iloc[0, 0])
-      var['nested_user_var'] = float(nres.vcomp[0])
-      var['nested_resid_var'] = float(nres.scale)
-      _write_json(var, jpath)
-    except Exception as e:  # pylint: disable=broad-except
-      print(f'[country] nested fit failed: {e!r}')
+  info = country_crossing_summary(df)
+  base = fit_lme(formula, df)
+  info.update(country_variance_share(df, base, metric))
+  cb = coef_table(base)
+  cols, se = {'winner': cb['coef']}, {'winner': cb['std_err']}
+  fe = coef_table(fit_lme(formula + ' + C(country_2_alpha_cd)', df))
+  cols['country_FE'], se['country_FE'] = fe['coef'], fe['std_err']
+  red, rinfo = reduce_overrepresented(df, 'lat_band', reduce_level,
+                                      reduce_max_share)
+  sl.residualise_temperature(red, 'harmonic')
+  rc = coef_table(fit_lme(formula, red))
+  key = f'{reduce_level.replace(" ", "_")}_reduced'
+  cols[key], se[key] = rc['coef'], rc['std_err']
+  info.update({f'reduced_{k}': v for k, v in rinfo.items()})
+  _write_json(info, jpath)
   table = pd.DataFrame(cols).join(pd.DataFrame(se), rsuffix='_se')
   table = table[~table.index.str.startswith('C(country')]
   table.index.name = 'term'
   write_csv(table, cpath, index=True)
-  return dict(variance=var, coefficients=table.reset_index(), counts=counts)
+  return dict(variance=info, coefficients=table.reset_index(), counts=counts)
 
 
 def fit_by_group(df: pd.DataFrame, formula: str, group_col: str,
                  min_users: int = 2000) -> pd.DataFrame:
-  """Winner refitted separately in each group (e.g. UN region) [R1-M3].
-
-  Returns long table (group, term, coef, std_err). Terms that cannot be
-  estimated within a group (e.g. latitude in a narrow region) are still
-  reported but will have wide CIs. REVIEW: min_users.
+  """Winner refitted separately on the user-months of each group (e.g. UN
+  region) [R1-M3]. Rows are selected per month, so a user who moved
+  contributes their months to each region. Temperature is re-residualised
+  within each group. Returns long table (group, term, coef, std_err).
+  REVIEW: min_users.
   """
-  user_level = modal_user_value(df, group_col)
   out = []
-  for level, n in user_level.value_counts().items():
+  users = df.groupby(group_col)['user_id_n'].nunique()
+  for level, n in users.sort_values(ascending=False).items():
     if n < min_users or str(level) in ('unknown', 'nan'):
       continue
-    sub = df[df['user_id_n'].isin(user_level.index[user_level == level])]
-    sub = sub.copy()
+    sub = df[df[group_col] == level].copy()
+    cnt = sub['user_id_n'].value_counts()
+    sub = sub[sub['user_id_n'].isin(cnt[cnt > 1].index)]
     sl.residualise_temperature(sub, 'harmonic')
     try:
       t = coef_table(fit_lme(formula, sub)).reset_index()
@@ -945,7 +958,7 @@ def fit_by_group(df: pd.DataFrame, formula: str, group_col: str,
       print(f'[by_group] {level}: {e!r}')
       continue
     t.insert(0, group_col, level)
-    t['n_users'] = n
+    t['n_users'] = int(sub['user_id_n'].nunique())
     out.append(t)
   return pd.concat(out, ignore_index=True) if out else pd.DataFrame()
 

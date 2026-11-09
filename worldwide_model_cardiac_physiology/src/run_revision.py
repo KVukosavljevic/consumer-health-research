@@ -48,7 +48,6 @@ def main() -> None:
   p.add_argument('--holdout_countries', default='GB,IN,CA,BR,ZA,AU')
   p.add_argument('--min_users_per_fold', type=int, default=200)
   p.add_argument('--sparse_country_max_users', type=int, default=1000)
-  p.add_argument('--country_cap', type=int, default=300)
   p.add_argument('--valid_days_csv', default=None)
   p.add_argument('--force', action='store_true')
   a = p.parse_args()
@@ -76,7 +75,7 @@ def main() -> None:
                           force=a.force)
   if 'A3' in sections:
     rl.run_country_robustness(df, formula, a.metric, out('A3_country'),
-                              cap=a.country_cap, force=a.force)
+                              force=a.force)
   if 'A5' in sections and rl.VALID_DAYS_COL in df:
     rl.run_threshold_sensitivity(df, formula, a.metric, out('A5_thresholds'),
                                  force=a.force)
