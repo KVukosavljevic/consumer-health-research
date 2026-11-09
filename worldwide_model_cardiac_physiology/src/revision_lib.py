@@ -911,7 +911,7 @@ def run_country_robustness(df: pd.DataFrame, formula: str, metric: str,
                            force: bool = False) -> Dict[str, Any]:
   """R1-M3 without assigning users to countries.
 
-  1. Users / user-months per country and how many users cross countries.
+  1. How many users cross countries or latitude bands.
   2. Share of residual variance between countries (country of each month).
   3. Coefficients of the winner: (a) as fitted; (b) with country fixed
      effects ``C(country_2_alpha_cd)`` taken per user-month, so a user who
@@ -929,10 +929,7 @@ def run_country_robustness(df: pd.DataFrame, formula: str, metric: str,
   jpath = os.path.join(out_dir, 'country_variance_share.json')
   cpath = os.path.join(out_dir, 'country_coefficients_compare.csv')
   if fio.file_exists(jpath) and fio.file_exists(cpath) and not force:
-    return dict(variance=_read_json(jpath), coefficients=read_csv(cpath),
-                counts=read_csv(os.path.join(out_dir, 'country_counts.csv')))
-  counts = country_counts(df)
-  write_csv(counts, os.path.join(out_dir, 'country_counts.csv'), index=True)
+    return dict(variance=_read_json(jpath), coefficients=read_csv(cpath))
   info = country_crossing_summary(df)
   base = fit_lme(formula, df)
   info.update(country_variance_share(df, base, metric))
@@ -953,7 +950,7 @@ def run_country_robustness(df: pd.DataFrame, formula: str, metric: str,
   table = table[~table.index.str.startswith('C(country')]
   table.index.name = 'term'
   write_csv(table, cpath, index=True)
-  return dict(variance=info, coefficients=table.reset_index(), counts=counts)
+  return dict(variance=info, coefficients=table.reset_index())
 
 
 def fit_by_group(df: pd.DataFrame, formula: str, group_col: str,
